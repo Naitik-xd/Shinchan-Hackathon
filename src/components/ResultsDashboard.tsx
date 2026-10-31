@@ -130,6 +130,11 @@ ${result.conflicts
             <span className="text-xs font-mono font-bold tracking-wider uppercase px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20">
               Intelligence Dashboard
             </span>
+            {result.topic && (
+              <span className="text-xs font-mono font-bold tracking-wider uppercase px-2 py-0.5 rounded bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20">
+                Topic: {result.topic}
+              </span>
+            )}
             <span className="text-xs font-mono text-slate-400">
               {result.sources.length} sources analyzed
             </span>
@@ -371,6 +376,102 @@ ${result.conflicts
                   </div>
                 </div>
               ))}
+            </div>
+          </div>
+
+          {/* Source Reading Status (Requirement 2) */}
+          <div className="p-6 rounded-2xl bg-white dark:bg-[#12151D] border border-slate-200 dark:border-[#232838] shadow-sm space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                  Source Reading Status ({result.sources.length})
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Inspection details of what the server fetched and extracted from each source.
+                </p>
+              </div>
+              <span className="text-xs font-mono text-slate-400">
+                {result.sources.filter((s) => s.status !== "failed").length} of {result.sources.length} read successfully
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+              {result.sources.map((s) => {
+                const isFailed = s.status === "failed";
+                const charCount = s.charCount ?? s.text.length;
+
+                return (
+                  <div
+                    key={s.id}
+                    className={`p-4 rounded-xl border transition-colors ${
+                      isFailed
+                        ? "bg-rose-500/5 border-rose-500/20"
+                        : "bg-slate-50 dark:bg-[#0B0D12] border-slate-200 dark:border-[#232838]"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2 mb-1.5">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-xs font-bold text-indigo-600 dark:text-indigo-400">
+                          {s.id}
+                        </span>
+                        <span className="text-[11px] font-mono text-slate-500 uppercase">
+                          ({s.kind})
+                        </span>
+                      </div>
+                      <span
+                        className={`font-mono text-[10px] uppercase font-bold px-2 py-0.5 rounded ${
+                          isFailed
+                            ? "bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/20"
+                            : "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
+                        }`}
+                      >
+                        {isFailed ? "Could not be read" : "Read OK"}
+                      </span>
+                    </div>
+
+                    <h4 className="text-xs font-semibold text-slate-900 dark:text-white leading-snug line-clamp-1" title={s.title}>
+                      {s.title}
+                    </h4>
+
+                    {s.url && (
+                      <p className="text-[11px] font-mono text-slate-400 truncate mt-0.5" title={s.url}>
+                        {s.url}
+                      </p>
+                    )}
+
+                    <div className="flex items-center justify-between text-[11px] font-mono text-slate-500 mt-2 pt-2 border-t border-slate-200/60 dark:border-slate-800/60">
+                      <span>
+                        {isFailed ? (
+                          <span className="text-rose-500 font-semibold">
+                            Reason: {s.failureReason || "Read failed"}
+                          </span>
+                        ) : (
+                          <span>{charCount.toLocaleString()} chars extracted</span>
+                        )}
+                      </span>
+                      {s.statusCode && (
+                        <span className="text-slate-400">HTTP {s.statusCode}</span>
+                      )}
+                    </div>
+
+                    {/* Collapsible View Extracted Text */}
+                    <details className="mt-2.5 group">
+                      <summary className="cursor-pointer text-[11px] font-mono text-indigo-600 dark:text-indigo-400 hover:underline select-none">
+                        ▶ View extracted text ({charCount.toLocaleString()} chars)
+                      </summary>
+                      <div className="mt-2 p-3 rounded-lg bg-slate-900 text-slate-200 font-mono text-[11px] max-h-44 overflow-y-auto whitespace-pre-wrap select-text leading-relaxed">
+                        {s.text && s.text.length > 0 ? (
+                          s.text
+                        ) : (
+                          <span className="text-slate-500 italic">
+                            No text extracted. Reason: {s.failureReason || "Empty or blocked content"}
+                          </span>
+                        )}
+                      </div>
+                    </details>
+                  </div>
+                );
+              })}
             </div>
           </div>
 
@@ -732,9 +833,22 @@ ${result.conflicts
                       <h4 className="text-xs font-semibold text-slate-900 dark:text-white">
                         {s.title}
                       </h4>
-                      <p className="text-[11px] font-mono text-slate-500 mt-0.5">
-                        Kind: {s.kind}
-                      </p>
+                      <div className="flex items-center justify-between text-[11px] font-mono text-slate-500 mt-1">
+                        <span>Kind: {s.kind} · {(s.charCount ?? s.text.length).toLocaleString()} chars</span>
+                        {s.status === "failed" ? (
+                          <span className="text-rose-500 font-semibold">{s.failureReason || "Could not be read"}</span>
+                        ) : (
+                          <span className="text-emerald-500 font-semibold">Read OK</span>
+                        )}
+                      </div>
+                      <details className="mt-2 group">
+                        <summary className="cursor-pointer text-[10px] font-mono text-indigo-500 hover:underline select-none">
+                          View extracted text
+                        </summary>
+                        <div className="mt-1.5 p-2 rounded bg-slate-900 text-slate-300 font-mono text-[10px] max-h-36 overflow-y-auto whitespace-pre-wrap select-text">
+                          {s.text || s.failureReason || "No text extracted"}
+                        </div>
+                      </details>
                     </div>
                   </div>
                 );

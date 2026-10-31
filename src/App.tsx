@@ -103,12 +103,17 @@ export default function App() {
 
       if (!extractRes.ok) {
         const err = await extractRes.json().catch(() => ({}));
-        throw new Error(err.message || err.error || "Step 1 (Fact Extraction) failed.");
+        throw new Error(err.error || err.message || "Step 1 (Fact Extraction) failed.");
       }
 
       const extractData = await extractRes.json();
       const extractedSources: Source[] = extractData.sources || sources;
       const extractedFacts = extractData.facts || [];
+
+      // FAIL LOUDLY CHECK: If step 1 produces 0 facts, STOP pipeline and show clear error
+      if (!extractedFacts || extractedFacts.length === 0) {
+        throw new Error("We couldn't read these sources. Try pasting the text instead.");
+      }
 
       // Step 2: POST /api/analyze
       setPipelineStage("analyzing");
@@ -124,7 +129,7 @@ export default function App() {
 
       if (!analyzeRes.ok) {
         const err = await analyzeRes.json().catch(() => ({}));
-        throw new Error(err.message || err.error || "Step 2 (Cross-source analysis) failed.");
+        throw new Error(err.error || err.message || "Step 2 (Cross-source analysis) failed.");
       }
 
       const analyzeData = await analyzeRes.json();
@@ -134,6 +139,7 @@ export default function App() {
         id: `analysis-${Date.now()}`,
         timestamp: new Date().toISOString(),
         question,
+        topic: analyzeData.topic,
         sources: extractedSources,
         facts: extractedFacts,
         coverage: analyzeData.coverage || [],

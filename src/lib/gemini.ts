@@ -76,12 +76,6 @@ export function categorizeGeminiError(err: any): FailureCategory {
   return "other";
 }
 
-// Emergency safety fallback pool in case all configured models suffer 404 / 503 outages
-const EMERGENCY_FALLBACK_MODELS = [
-  "gemini-flash-lite-latest",
-  "gemini-flash-latest",
-  "gemini-3.5-flash-lite",
-];
 
 function generateWithTimeout(
   ai: any,
@@ -115,7 +109,7 @@ export async function callGeminiJson<T>(
   const configuredModels = getModelList();
   const failures: ModelFailureInfo[] = [];
 
-  // 1. Try configured models in exact requested order
+  // Try configured models in exact requested order
   for (let i = 0; i < configuredModels.length; i++) {
     const modelName = configuredModels[i];
     try {
@@ -132,7 +126,7 @@ export async function callGeminiJson<T>(
             temperature: 0.1,
           },
         },
-        7000
+        14000
       );
 
       const text = response.text;
@@ -148,7 +142,7 @@ export async function callGeminiJson<T>(
       const fallbackNotice =
         failures.length > 0
           ? `Answered using ${modelName} (fallback: ${failures
-              .map((f) => `${f.model} failed [${f.category}]`)
+              .map((f) => `${f.model} [${f.category}]`)
               .join(", ")})`
           : undefined;
 
@@ -163,58 +157,20 @@ export async function callGeminiJson<T>(
       const category = categorizeGeminiError(err);
       failures.push({ model: modelName, category });
       console.warn(
-        `[LUMEN SERVER] Model "${modelName}" failed with reason category: "${category}". Details: ${err?.message || err}`
+        `[LUMEN SERVER] Model "${modelName}" failed [${category}]. Details: ${err?.message || err}`
       );
     }
   }
 
-  // 2. Emergency fallback pool to prevent 500 error if all configured models are unavailable
-  for (const fallbackModel of EMERGENCY_FALLBACK_MODELS) {
-    if (configuredModels.includes(fallbackModel)) continue;
-    try {
-      console.warn(`[LUMEN SERVER] Engaging emergency fallback model: ${fallbackModel}`);
-      const response = await generateWithTimeout(
-        ai,
-        {
-          model: fallbackModel,
-          contents: prompt,
-          config: {
-            systemInstruction:
-              systemInstruction ||
-              "You are an expert analytical research assistant. Output strictly valid JSON with no markdown wrapping.",
-            responseMimeType: "application/json",
-            temperature: 0.1,
-          },
-        },
-        12000
-      );
-
-      const text = response.text;
-      if (text) {
-        const parsed: T = JSON.parse(cleanJsonText(text));
-        const fallbackNotice = `Answered using ${fallbackModel} (fallback: ${failures
-          .map((f) => `${f.model} failed [${f.category}]`)
-          .join(", ")})`;
-
-        return {
-          data: parsed,
-          modelUsed: fallbackModel,
-          fallbackUsed: true,
-          fallbackNotice,
-          failureCategories: failures,
-        };
-      }
-    } catch (err: any) {
-      const category = categorizeGeminiError(err);
-      failures.push({ model: fallbackModel, category });
-      console.warn(`[LUMEN SERVER] Emergency model "${fallbackModel}" failed [${category}]:`, err?.message || err);
-    }
+  // If any model failed due to quota/429
+  if (failures.some((f) => f.category === "quota")) {
+    throw new Error("model quota reached, please retry shortly");
   }
 
   throw new Error(
-    `All configured Gemini models failed. Failure categories: ${failures
-      .map((f) => `${f.model} (${f.category})`)
-      .join(", ")}`
+    `All configured Gemini models failed. (${failures
+      .map((f) => `${f.model}: ${f.category}`)
+      .join(", ")})`
   );
 }
 
@@ -235,13 +191,8 @@ export async function callGeminiSearchGrounding(
   const configuredModels = getModelList();
   const failures: ModelFailureInfo[] = [];
 
-  const modelsToTry = [
-    ...configuredModels,
-    ...EMERGENCY_FALLBACK_MODELS.filter((m) => !configuredModels.includes(m)),
-  ];
-
-  for (let i = 0; i < modelsToTry.length; i++) {
-    const modelName = modelsToTry[i];
+  for (let i = 0; i < configuredModels.length; i++) {
+    const modelName = configuredModels[i];
     try {
       const response = await generateWithTimeout(
         ai,
@@ -255,7 +206,7 @@ export async function callGeminiSearchGrounding(
             tools: [{ googleSearch: {} }],
           },
         },
-        10000
+        14000
       );
 
       const text = response.text || "";
@@ -285,6 +236,10 @@ export async function callGeminiSearchGrounding(
     }
   }
 
+  if (failures.some((f) => f.category === "quota")) {
+    throw new Error("model quota reached, please retry shortly");
+  }
+
   throw new Error(
     `Grounded search failed across all models (${failures
       .map((f) => `${f.model} [${f.category}]`)
@@ -302,10 +257,7 @@ export async function callGeminiVision(
 ): Promise<{ text: string; modelUsed: string }> {
   const ai = getGeminiClient();
   const configuredModels = getModelList();
-  const modelsToTry = [
-    ...configuredModels,
-    ...EMERGENCY_FALLBACK_MODELS.filter((m) => !configuredModels.includes(m)),
-  ];
+  const modelsToTry = configuredModels;
 
   let cleanBase64 = imageBase64;
   if (cleanBase64.includes(";base64,")) {

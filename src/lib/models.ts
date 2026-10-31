@@ -11,7 +11,7 @@
 export const DEFAULT_GEMINI_MODELS: string[] = [
   "gemini-2.5-flash",
   "gemini-3.8-flash",
-  "gemini-2.5-flash-lite"
+  "gemini-2.5-flash-lite",
 ];
 
 export function getModelList(): string[] {

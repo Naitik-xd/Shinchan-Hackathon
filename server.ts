@@ -25,11 +25,14 @@ import {
   buildEnrichPrompt,
 } from "./src/lib/prompts.js";
 import {
+  classifyTopicFromText,
+  getTaxonomyForTopic,
   detectDeterministicConflicts,
   buildDeterministicCoverage,
   buildTaxonomyGaps,
   buildComprehensiveChecklist,
   normalizeAspectKey,
+  TopicType,
 } from "./src/lib/taxonomy.js";
 import { Fact, Source, Conflict, Gap } from "./src/types/index.js";
 
@@ -77,7 +80,7 @@ async function startServer() {
 
       const { question, sources: inputSources } = parsedBody.data;
 
-      // 1. Process sources: fetch URLs server-side with SSRF protection
+      // 1. Process and fetch sources server-side with strict status checks
       const processedSources: Source[] = [];
       for (let i = 0; i < inputSources.length; i++) {
         const item = inputSources[i];
@@ -86,59 +89,118 @@ async function startServer() {
         if (item.kind === "url" && item.url) {
           try {
             const fetched = await safeFetchUrl(item.url);
-            processedSources.push({
-              id: assignedId,
-              kind: "url",
-              title: item.title || fetched.title,
-              url: item.url,
-              text: fetched.text,
-              publishedDate: fetched.publishedDate,
-              dateStatus: fetched.dateStatus,
-            });
+            const textContent = (fetched.text || "").trim();
+            const charCount = textContent.length;
+
+            if (charCount < 300) {
+              const reason = charCount === 0 ? "Empty page content" : `Content too short (${charCount} characters)`;
+              processedSources.push({
+                id: assignedId,
+                kind: "url",
+                title: item.title || fetched.title,
+                url: item.url,
+                text: textContent,
+                publishedDate: fetched.publishedDate,
+                dateStatus: fetched.dateStatus,
+                status: "failed",
+                failureReason: reason,
+                charCount,
+                statusCode: fetched.statusCode,
+              });
+            } else {
+              processedSources.push({
+                id: assignedId,
+                kind: "url",
+                title: item.title || fetched.title,
+                url: item.url,
+                text: textContent,
+                publishedDate: fetched.publishedDate,
+                dateStatus: fetched.dateStatus,
+                status: "ok",
+                charCount,
+                statusCode: fetched.statusCode,
+              });
+            }
           } catch (fetchErr: any) {
-            console.warn(`[LUMEN SERVER] Failed to fetch URL ${item.url}:`, fetchErr.message);
+            console.warn(`[LUMEN SERVER] Failed to fetch URL "${item.url}":`, fetchErr.message);
             processedSources.push({
               id: assignedId,
               kind: "url",
               title: item.title || item.url,
               url: item.url,
-              text: `[Error fetching URL: ${fetchErr.message}]`,
+              text: "",
               dateStatus: "undated",
+              status: "failed",
+              failureReason: fetchErr.message,
+              charCount: 0,
             });
           }
         } else {
+          const textContent = (item.text || "").trim();
+          const charCount = textContent.length;
+          const status = charCount >= 300 ? "ok" : "failed";
+          const failureReason = charCount < 300
+            ? (charCount === 0 ? "Empty text provided" : `Content too short (${charCount} characters)`)
+            : undefined;
+
           processedSources.push({
             id: assignedId,
             kind: item.kind,
             title: item.title,
-            text: item.text,
+            text: textContent,
             ocrConfidence: item.ocrConfidence,
             publishedDate: item.publishedDate,
             dateStatus: item.dateStatus || "undated",
             pageCount: item.pageCount,
+            status,
+            failureReason,
+            charCount,
           });
         }
       }
 
-      // 2. Build extraction prompt & call Gemini with exhaustive extraction instructions
-      const extractPrompt = buildExtractPrompt(question, processedSources);
-      const geminiResult = await callGeminiJson<{
-        analyzedSources?: Array<{
-          sourceId: string;
-          isOfficial?: boolean;
-          sourceTypeGuess?: string;
-          publishedDate?: string;
-          dateStatus?: "found" | "undated" | "possibly_outdated";
-          cycleReference?: string;
-          facts?: Array<{
-            aspect: string;
-            normalizedAspect?: string;
-            normalizedValue?: string;
-            claim: string;
-            snippet: string;
+      // FAIL LOUDLY, NEVER SILENTLY:
+      // If fewer than 1 source has usable text (>300 chars), STOP pipeline immediately
+      const usableSources = processedSources.filter((s) => s.status === "ok");
+      if (usableSources.length < 1) {
+        console.warn("[LUMEN SERVER] Stopping pipeline: No sources have usable text (>300 chars).");
+        return res.status(400).json({
+          error: "We couldn't read these sources. Try pasting the text instead.",
+          sources: processedSources,
+          facts: [],
+        });
+      }
+
+      // 2. REDUCE QUOTA USE: Do ONE Gemini call for extraction for ALL usable sources together
+      const extractPrompt = buildExtractPrompt(question, usableSources);
+
+      let geminiResult;
+      try {
+        geminiResult = await callGeminiJson<{
+          analyzedSources?: Array<{
+            sourceId: string;
+            isOfficial?: boolean;
+            sourceTypeGuess?: string;
+            publishedDate?: string;
+            dateStatus?: "found" | "undated" | "possibly_outdated";
+            facts?: Array<{
+              aspect: string;
+              normalizedAspect?: string;
+              normalizedValue?: string;
+              claim: string;
+              snippet: string;
+            }>;
           }>;
-        }>;
-      }>(extractPrompt);
+        }>(extractPrompt);
+      } catch (geminiErr: any) {
+        if (geminiErr.message?.includes("quota")) {
+          return res.status(429).json({
+            error: "model quota reached, please retry shortly",
+            sources: processedSources,
+          });
+        }
+        throw geminiErr;
+      }
 
       const analyzedSources = geminiResult.data.analyzedSources || [];
       const facts: Fact[] = [];
@@ -157,15 +219,14 @@ async function startServer() {
           if (typeof aiInfo.isOfficial === "boolean") {
             s.isOfficial = aiInfo.isOfficial;
           } else {
-            // Heuristic fallback for official source identification
             const lower = (s.title + " " + (s.url || "")).toLowerCase();
             s.isOfficial =
               lower.includes("official") ||
               lower.includes("portal") ||
               lower.includes(".gov") ||
               lower.includes(".edu") ||
-              lower.includes("handbook") ||
-              lower.includes("offer letter");
+              lower.includes(".org") ||
+              lower.includes("handbook");
           }
           if (aiInfo.sourceTypeGuess) {
             s.sourceTypeGuess = aiInfo.sourceTypeGuess;
@@ -193,6 +254,16 @@ async function startServer() {
         }
       }
 
+      // FAIL LOUDLY: If Step 1 produces 0 facts, STOP pipeline and return clear error
+      if (facts.length === 0) {
+        console.warn("[LUMEN SERVER] Stopping pipeline: Step 1 produced 0 verifiable facts.");
+        return res.status(400).json({
+          error: "We couldn't read these sources. Try pasting the text instead.",
+          sources: processedSources,
+          facts: [],
+        });
+      }
+
       return res.json({
         sources: processedSources,
         facts,
@@ -202,6 +273,11 @@ async function startServer() {
       });
     } catch (err: any) {
       console.error("[LUMEN SERVER] /api/extract error:", err);
+      if (err.message?.includes("quota")) {
+        return res.status(429).json({
+          error: "model quota reached, please retry shortly",
+        });
+      }
       return res.status(500).json({
         error: "Failed to extract facts from provided sources.",
         message: err.message,
@@ -222,6 +298,13 @@ async function startServer() {
 
       const { question, sources, facts } = parsedBody.data;
 
+      // Ensure we never analyze 0 facts
+      if (!facts || facts.length === 0) {
+        return res.status(400).json({
+          error: "We couldn't read these sources. Try pasting the text instead.",
+        });
+      }
+
       const sourcesBrief = sources.map((s) => ({
         id: s.id || "S?",
         title: s.title,
@@ -232,24 +315,42 @@ async function startServer() {
         dateStatus: s.dateStatus,
       }));
 
-      // 1. DETERMINISTIC CONFLICT DETECTION IN CODE (Point 3)
-      // Group facts by normalized aspect and detect incompatible values between sources
+      // 1. TOPIC-AWARE TAXONOMY CLASSIFICATION
+      const combinedSourcesText = sources.map((s) => s.title + " " + (s.text || "")).join(" ");
+      const detectedTopic: TopicType = classifyTopicFromText(question, combinedSourcesText);
+      const topicAspects = getTaxonomyForTopic(detectedTopic);
+
+      // 2. DETERMINISTIC CONFLICT DETECTION
       const deterministicCandidateConflicts = detectDeterministicConflicts(
         facts as Fact[],
         sourcesBrief as Source[]
       );
 
-      // 2. Call Gemini for analysis, passing deterministic candidates to confirm and expand
+      // 3. CALL GEMINI FOR ANALYSIS (Topic-aware, evidence rule enforced)
       const analyzePrompt = buildAnalyzePrompt(
         question,
         sourcesBrief,
         facts,
-        deterministicCandidateConflicts
+        deterministicCandidateConflicts,
+        detectedTopic,
+        topicAspects
       );
-      const geminiResult = await callGeminiJson<any>(analyzePrompt);
+
+      let geminiResult;
+      try {
+        geminiResult = await callGeminiJson<any>(analyzePrompt);
+      } catch (geminiErr: any) {
+        if (geminiErr.message?.includes("quota")) {
+          return res.status(429).json({
+            error: "model quota reached, please retry shortly",
+          });
+        }
+        throw geminiErr;
+      }
+
       const data = geminiResult.data;
 
-      // 3. Merge AI conflicts with deterministic conflicts (no conflict ever lost)
+      // 4. Merge AI conflicts with deterministic conflicts
       const mergedConflicts: Conflict[] = [...deterministicCandidateConflicts];
       const aiConflicts = Array.isArray(data.conflicts) ? data.conflicts : [];
 
@@ -273,21 +374,23 @@ async function startServer() {
         }
       }
 
-      // 4. COVERAGE METER: built deterministically from canonical taxonomy (Point 6)
+      // 5. COVERAGE METER: built deterministically from topic-aware taxonomy
       const canonicalCoverage = buildDeterministicCoverage(
         facts as Fact[],
-        sourcesBrief as Source[]
+        sourcesBrief as Source[],
+        detectedTopic
       );
 
-      // 5. GAP TAXONOMY: standard aspects + single unofficial source flags (Point 4 & 5)
+      // 6. GAP TAXONOMY: standard aspects strictly following evidence rule
       const rawAiGaps = Array.isArray(data.gaps) ? data.gaps : [];
       const comprehensiveGaps = buildTaxonomyGaps(
         facts as Fact[],
         sourcesBrief as Source[],
+        detectedTopic,
         rawAiGaps
       );
 
-      // 6. CHECKLIST: one prioritized item per high/medium gap and per conflict (Point 7)
+      // 7. CHECKLIST: one prioritized item per high/medium gap and per conflict
       const rawAiChecklist = Array.isArray(data.checklist) ? data.checklist : [];
       const comprehensiveChecklist = buildComprehensiveChecklist(
         comprehensiveGaps,
@@ -296,23 +399,20 @@ async function startServer() {
       );
 
       const responsePayload = {
+        topic: detectedTopic,
         coverage: canonicalCoverage,
         gaps: comprehensiveGaps,
         conflicts: mergedConflicts,
         outdated: Array.isArray(data.outdated) ? data.outdated : [],
-        credibilitySignals: Array.isArray(data.credibilitySignals)
-          ? data.credibilitySignals
-          : [],
+        credibilitySignals: Array.isArray(data.credibilitySignals) ? data.credibilitySignals : [],
         checklist: comprehensiveChecklist,
-        overallConfidence: {
-          level: data.overallConfidence?.level || (mergedConflicts.length > 0 || comprehensiveGaps.length >= 4 ? "low" : "medium"),
-          scoreNote: data.overallConfidence?.scoreNote || `Identified ${comprehensiveGaps.length} gaps and ${mergedConflicts.length} direct contradictions across ${sourcesBrief.length} sources.`,
-          reasons: Array.isArray(data.overallConfidence?.reasons) && data.overallConfidence.reasons.length > 0
-            ? data.overallConfidence.reasons
-            : [
-                `${mergedConflicts.length} direct contradictions require organizer verification.`,
-                `${comprehensiveGaps.filter((g) => g.severity === "high").length} high-severity aspects omitted from official documentation.`,
-              ],
+        overallConfidence: data.overallConfidence || {
+          level: comprehensiveGaps.some((g) => g.severity === "high") ? "low" : "medium",
+          scoreNote: `Topic classified as ${detectedTopic}. Review flagged dark spots before proceeding.`,
+          reasons: [
+            `${sourcesBrief.length} sources reviewed for ${detectedTopic}`,
+            `${comprehensiveGaps.length} information dark spots identified`,
+          ],
         },
         modelUsed: geminiResult.modelUsed,
         fallbackUsed: geminiResult.fallbackUsed,
@@ -322,8 +422,13 @@ async function startServer() {
       return res.json(responsePayload);
     } catch (err: any) {
       console.error("[LUMEN SERVER] /api/analyze error:", err);
+      if (err.message?.includes("quota")) {
+        return res.status(429).json({
+          error: "model quota reached, please retry shortly",
+        });
+      }
       return res.status(500).json({
-        error: "Failed to cross-compare and analyze source contradictions.",
+        error: "Failed to perform analysis on provided sources.",
         message: err.message,
       });
     }
@@ -342,138 +447,108 @@ async function startServer() {
 
       const { question, gaps, sources } = parsedBody.data;
 
-      // If no gaps need enrichment, return empty array immediately
       if (!gaps || gaps.length === 0) {
-        return res.json({
-          enrichments: [],
-          reputationNotes: [],
-          modelUsed: "none",
-          fallbackUsed: false,
-        });
+        return res.json({ enrichments: [] });
       }
 
       const enrichPrompt = buildEnrichPrompt(question, gaps, sources);
 
+      let geminiResult;
       try {
-        const { text, groundingChunks, modelUsed, fallbackUsed, fallbackNotice } =
-          await callGeminiSearchGrounding(enrichPrompt);
-
-        // Extract real reference links from groundingChunks
-        const verifiedReferences: Array<{ title: string; url: string }> = [];
-        for (const chunk of groundingChunks) {
-          if (chunk.web?.uri) {
-            verifiedReferences.push({
-              title: chunk.web.title || "Public Web Source",
-              url: chunk.web.uri,
-            });
-          }
+        geminiResult = await callGeminiSearchGrounding(enrichPrompt);
+      } catch (geminiErr: any) {
+        if (geminiErr.message?.includes("quota")) {
+          return res.status(429).json({
+            error: "model quota reached, please retry shortly",
+          });
         }
-
-        // Parse JSON output leniently
-        let parsedData: any = {};
-        try {
-          parsedData = JSON.parse(cleanJsonText(text));
-        } catch (jsonErr) {
-          console.warn("[LUMEN SERVER] Grounding JSON parse failed, utilizing fallback structure.");
-          parsedData = { enrichments: [] };
-        }
-
-        const rawEnrichments = Array.isArray(parsedData.enrichments)
-          ? parsedData.enrichments
-          : [];
-
-        // Ensure EVERY gap has an explicit enrichment entry (Point 8)
-        const finalEnrichments = gaps.map((gap, index) => {
-          const match = rawEnrichments.find((e: any) => e.gapId === gap.id);
-
-          if (match && match.finding) {
-            const refs =
-              Array.isArray(match.references) && match.references.length > 0
-                ? match.references
-                : verifiedReferences.slice(index * 2, index * 2 + 2);
-
-            return {
-              gapId: gap.id,
-              finding: match.finding,
-              confidence: match.confidence || "medium",
-              references: refs,
-              tier: "ai_found" as const,
-            };
-          }
-
-          // If no public information was found, show explicit statement (Point 8)
-          return {
-            gapId: gap.id,
-            finding: "No public results found for this gap via search grounding. Verification with primary organizers/advisors required.",
-            confidence: "low" as const,
-            references: [],
-            tier: "ai_found" as const,
-          };
-        });
-
-        return res.json({
-          enrichments: finalEnrichments,
-          reputationNotes: parsedData.reputationNotes || [],
-          modelUsed,
-          fallbackUsed,
-          fallbackNotice,
-        });
-      } catch (searchErr: any) {
-        console.warn("[LUMEN SERVER] Google Search Grounding error, providing default gap notices:", searchErr.message);
-
-        // Ensure all gaps receive the explicit "No public results found" notice (Point 8)
-        const fallbackEnrichments = gaps.map((g) => ({
-          gapId: g.id,
-          finding: "No public results found for this gap via search grounding. Verification with primary organizers/advisors required.",
-          confidence: "low" as const,
-          references: [],
-          tier: "ai_found" as const,
-        }));
-
-        return res.json({
-          enrichments: fallbackEnrichments,
-          reputationNotes: [],
-          webEnrichmentUnavailable: true,
-          message: "Google Search grounding was unavailable or rate-limited. Results from Steps 1 & 2 remain fully valid.",
-        });
+        throw geminiErr;
       }
+
+      const rawText = geminiResult.text;
+      let enrichments: any[] = [];
+
+      try {
+        const parsed = JSON.parse(cleanJsonText(rawText));
+        if (Array.isArray(parsed.enrichments)) {
+          enrichments = parsed.enrichments.map((en: any) => ({
+            ...en,
+            tier: "ai_found",
+            references: Array.isArray(en.references) ? en.references : [],
+          }));
+        }
+      } catch {
+        enrichments = gaps.slice(0, 3).map((g) => ({
+          gapId: g.id,
+          finding: rawText.slice(0, 300) || "No public results found for this gap in official sources reviewed.",
+          confidence: "medium",
+          references: [],
+          tier: "ai_found",
+        }));
+      }
+
+      // If any gap has no finding, state clearly
+      for (const g of gaps) {
+        const exists = enrichments.some((e) => e.gapId === g.id);
+        if (!exists) {
+          enrichments.push({
+            gapId: g.id,
+            finding: "No public results found for this gap in official sources reviewed.",
+            confidence: "low",
+            references: [],
+            tier: "ai_found",
+          });
+        }
+      }
+
+      return res.json({
+        enrichments,
+        modelUsed: geminiResult.modelUsed,
+        fallbackUsed: geminiResult.fallbackUsed,
+        fallbackNotice: geminiResult.fallbackNotice,
+      });
     } catch (err: any) {
       console.error("[LUMEN SERVER] /api/enrich error:", err);
+      if (err.message?.includes("quota")) {
+        return res.status(429).json({
+          error: "model quota reached, please retry shortly",
+        });
+      }
       return res.status(500).json({
-        error: "Web enrichment encountered an unexpected error.",
+        error: "Failed to enrich gaps with public search.",
         message: err.message,
       });
     }
   });
 
-  // --- VISION READ FALLBACK: POST /api/vision-read ---
+  // --- POST /api/vision-read ---
   app.post("/api/vision-read", rateLimitMiddleware, async (req: Request, res: Response) => {
     try {
       const parsedBody = VisionReadRequestSchema.safeParse(req.body);
       if (!parsedBody.success) {
         return res.status(400).json({
-          error: "Invalid vision-read payload",
+          error: "Invalid vision-read request payload",
           details: parsedBody.error.flatten(),
         });
       }
 
       const { imageBase64, mimeType, prompt } = parsedBody.data;
-      const { text, modelUsed } = await callGeminiVision(imageBase64, mimeType, prompt);
+      const result = await callGeminiVision(imageBase64, mimeType, prompt);
 
       return res.json({
-        text,
-        modelUsed,
+        text: result.text,
+        modelUsed: result.modelUsed,
       });
     } catch (err: any) {
       console.error("[LUMEN SERVER] /api/vision-read error:", err);
       return res.status(500).json({
-        error: "Failed to transcribe image via Gemini Vision.",
+        error: "Failed to read image via Gemini Vision.",
         message: err.message,
       });
     }
   });
 
-  // Vite Integration
+  // In development, hook up Vite middleware
   if (!isProduction) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -481,19 +556,19 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.resolve(__dirname, "dist");
-    app.use(express.static(distPath));
-    app.get("*", (_req: Request, res: Response) => {
-      res.sendFile(path.resolve(distPath, "index.html"));
+    // In production, serve built frontend
+    app.use(express.static(path.resolve(__dirname, "dist")));
+    app.get("*", (req: Request, res: Response) => {
+      res.sendFile(path.resolve(__dirname, "dist", "index.html"));
     });
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`[LUMEN] Server running at http://0.0.0.0:${PORT} in ${isProduction ? "production" : "development"} mode.`);
+    console.log(`[LUMEN SERVER] Running on http://localhost:${PORT}`);
   });
 }
 
 startServer().catch((err) => {
-  console.error("[LUMEN SERVER] Failed to start server:", err);
+  console.error("[LUMEN SERVER] Fatal startup failure:", err);
   process.exit(1);
 });

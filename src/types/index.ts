@@ -14,6 +14,10 @@ export interface Source {
   pageCount?: number;
   sourceTypeGuess?: string; // official_organizer, official_website, unofficial_blog, etc.
   isOfficial?: boolean;
+  status?: "ok" | "failed";
+  failureReason?: string;
+  charCount?: number;
+  statusCode?: number;
 }
 
 export interface Fact {
@@ -125,6 +129,7 @@ export interface AnalysisResult {
   modelUsed: string;
   fallbackUsed: boolean;
   fallbackNotice?: string;
+  topic?: string;
 }
 
 export interface SampleScenario {
