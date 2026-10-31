@@ -11,6 +11,8 @@ export const SourceInputSchema = z.object({
   publishedDate: z.string().optional(),
   dateStatus: z.enum(["found", "undated", "possibly_outdated"]).default("undated"),
   pageCount: z.number().optional(),
+  sourceTypeGuess: z.string().optional(),
+  isOfficial: z.boolean().optional(),
 });
 
 export const ExtractRequestSchema = z.object({
@@ -18,28 +20,24 @@ export const ExtractRequestSchema = z.object({
   sources: z.array(SourceInputSchema).min(1).max(8),
 });
 
-// Step 1: Extraction Schema
+// Step 1: Fact extraction schema
 export const ExtractedFactSchema = z.object({
-  aspect: z.string().min(1).max(60),
+  aspect: z.string().min(1).max(80),
+  normalizedAspect: z.string().min(1).max(80).default("general"),
+  normalizedValue: z.string().min(1).max(200).default("stated"),
   claim: z.string().min(2),
   snippet: z.string().min(2),
 });
 
 export const ExtractedSourceAnalysisSchema = z.object({
   sourceId: z.string(),
-  title: z.string(),
-  sourceTypeGuess: z.enum([
-    "official_government",
-    "education_academic",
-    "news_journalism",
-    "commercial_vendor",
-    "community_forum",
-    "unknown"
-  ]),
+  title: z.string().optional(),
+  sourceTypeGuess: z.string().default("unknown"),
+  isOfficial: z.boolean().default(false),
   publishedDate: z.string().nullable().optional(),
-  dateStatus: z.enum(["found", "undated", "possibly_outdated"]),
+  dateStatus: z.enum(["found", "undated", "possibly_outdated"]).default("undated"),
   cycleReference: z.string().nullable().optional(),
-  facts: z.array(ExtractedFactSchema),
+  facts: z.array(ExtractedFactSchema).default([]),
 });
 
 export const ExtractResponseSchema = z.object({
@@ -53,20 +51,27 @@ export const ExtractResponseSchema = z.object({
     publishedDate: z.string().optional(),
     dateStatus: z.enum(["found", "undated", "possibly_outdated"]),
     sourceTypeGuess: z.string().optional(),
+    isOfficial: z.boolean().optional(),
   })),
   facts: z.array(z.object({
     id: z.string(),
     aspect: z.string(),
+    normalizedAspect: z.string(),
+    normalizedValue: z.string(),
     claim: z.string(),
     sourceId: z.string(),
     snippet: z.string(),
     tier: z.literal("sourced"),
   })),
+  modelUsed: z.string().optional(),
+  fallbackUsed: z.boolean().optional(),
+  fallbackNotice: z.string().optional(),
 });
 
 // Step 2: Analysis Schemas
 export const CoverageItemSchema = z.object({
   aspect: z.string(),
+  normalizedAspect: z.string().optional(),
   status: z.enum(["covered", "partial", "missing"]),
   sourceIds: z.array(z.string()),
   summaryNote: z.string().optional(),
@@ -75,20 +80,29 @@ export const CoverageItemSchema = z.object({
 export const GapItemSchema = z.object({
   id: z.string(),
   aspect: z.string(),
+  normalizedAspect: z.string().optional(),
   description: z.string(),
   severity: z.enum(["high", "medium", "low"]),
   whyItMatters: z.string(),
   checkedSources: z.array(z.string()),
   tier: z.literal("uncertain").default("uncertain"),
+  gapType: z.enum([
+    "uncovered_standard_aspect",
+    "single_unofficial_source",
+    "missing_prerequisite",
+    "unstated_timeline"
+  ]).optional(),
 });
 
 export const ConflictItemSchema = z.object({
   id: z.string(),
   aspect: z.string(),
+  normalizedAspect: z.string().optional(),
   claims: z.array(z.object({
     sourceId: z.string(),
     claim: z.string(),
     snippet: z.string(),
+    normalizedValue: z.string().optional(),
   })).min(2),
   note: z.string(),
   tier: z.literal("uncertain").default("uncertain"),
@@ -130,10 +144,12 @@ export const AnalyzeRequestSchema = z.object({
   facts: z.array(z.object({
     id: z.string(),
     aspect: z.string(),
+    normalizedAspect: z.string().optional().default("general"),
+    normalizedValue: z.string().optional().default("stated"),
     claim: z.string(),
     sourceId: z.string(),
     snippet: z.string(),
-    tier: z.literal("sourced"),
+    tier: z.literal("sourced").default("sourced"),
   })),
 });
 
@@ -145,6 +161,9 @@ export const AnalyzeResponseSchema = z.object({
   credibilitySignals: z.array(CredibilitySignalSchema),
   checklist: z.array(ChecklistItemSchema),
   overallConfidence: OverallConfidenceSchema,
+  modelUsed: z.string().optional(),
+  fallbackUsed: z.boolean().optional(),
+  fallbackNotice: z.string().optional(),
 });
 
 // Step 3: Enrichment Schema

@@ -150,6 +150,7 @@ export default function App() {
         enrichments: [],
         modelUsed: analyzeData.modelUsed || extractData.modelUsed || "gemini-2.5-flash",
         fallbackUsed: analyzeData.fallbackUsed || extractData.fallbackUsed || false,
+        fallbackNotice: analyzeData.fallbackNotice || extractData.fallbackNotice,
       };
 
       setCurrentResult(preliminaryResult);

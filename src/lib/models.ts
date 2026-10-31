@@ -1,18 +1,17 @@
 /**
  * Central model configuration and fallback chain.
- * Default chain:
+ * Default order required:
  *  1. gemini-2.5-flash (primary)
  *  2. gemini-3.8-flash (fallback 1)
  *  3. gemini-2.5-flash-lite (fallback 2)
+ *
+ * Can be overridden by the GEMINI_MODELS environment variable (comma-separated).
  */
 
 export const DEFAULT_GEMINI_MODELS: string[] = [
-  "gemini-flash-lite-latest",
-  "gemini-flash-latest",
-  "gemini-3.5-flash-lite",
+  "gemini-2.5-flash",
   "gemini-3.8-flash",
-  "gemini-3.1-flash-lite-preview",
-  "gemini-2.5-flash"
+  "gemini-2.5-flash-lite"
 ];
 
 export function getModelList(): string[] {
@@ -27,8 +26,23 @@ export function getModelList(): string[] {
   return DEFAULT_GEMINI_MODELS;
 }
 
+export type FailureCategory =
+  | "quota"
+  | "not_found"
+  | "unavailable"
+  | "invalid_json"
+  | "network_error"
+  | "other";
+
+export interface ModelFailureInfo {
+  model: string;
+  category: FailureCategory;
+}
+
 export interface CallGeminiResult<T> {
   data: T;
   modelUsed: string;
   fallbackUsed: boolean;
+  fallbackNotice?: string;
+  failureCategories?: ModelFailureInfo[];
 }

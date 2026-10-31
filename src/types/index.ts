@@ -12,11 +12,15 @@ export interface Source {
   publishedDate?: string;   // ISO or textual date detected
   dateStatus: "found" | "undated" | "possibly_outdated";
   pageCount?: number;
+  sourceTypeGuess?: string; // official_organizer, official_website, unofficial_blog, etc.
+  isOfficial?: boolean;
 }
 
 export interface Fact {
   id: string;
-  aspect: string;           // e.g. eligibility, deadline, compensation, equity, renewal, contact...
+  aspect: string;           // Human readable e.g. "Team Size", "Submission Deadline"
+  normalizedAspect: string; // Standardized canonical key e.g. "team_size", "fees", "deadlines"
+  normalizedValue: string;  // Normalized concise value e.g. "2-4", "Free ($0)", "March 15, 2026"
   claim: string;
   sourceId: string;
   snippet: string;
@@ -26,22 +30,26 @@ export interface Fact {
 export interface Gap {
   id: string;
   aspect: string;
+  normalizedAspect?: string;
   description: string;
   severity: Severity;
   whyItMatters: string;
   checkedSources: string[]; // Source IDs checked
   tier: "uncertain";
+  gapType?: "uncovered_standard_aspect" | "single_unofficial_source" | "missing_prerequisite" | "unstated_timeline";
 }
 
 export interface ConflictClaim {
   sourceId: string;
   claim: string;
   snippet: string;
+  normalizedValue?: string;
 }
 
 export interface Conflict {
   id: string;
   aspect: string;
+  normalizedAspect?: string;
   claims: ConflictClaim[];
   note: string;
   tier: "uncertain";
@@ -55,6 +63,7 @@ export interface OutdatedWarning {
 
 export interface Coverage {
   aspect: string;
+  normalizedAspect?: string;
   status: "covered" | "partial" | "missing";
   sourceIds: string[];
   summaryNote?: string;
@@ -115,6 +124,7 @@ export interface AnalysisResult {
   enrichments: Enrichment[];
   modelUsed: string;
   fallbackUsed: boolean;
+  fallbackNotice?: string;
 }
 
 export interface SampleScenario {

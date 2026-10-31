@@ -131,18 +131,22 @@ ${result.conflicts
               Intelligence Dashboard
             </span>
             <span className="text-xs font-mono text-slate-400">
-              {result.sources.length} sources vetted
+              {result.sources.length} sources analyzed
             </span>
           </div>
           <h2 className="text-lg font-bold text-slate-900 dark:text-white leading-snug">
             {result.question}
           </h2>
-          <p className="text-xs text-slate-500 mt-1 flex items-center gap-2">
-            <span>Model: {result.modelUsed}</span>
-            {result.fallbackUsed && (
-              <span className="text-amber-500 font-mono">(fallback model utilized)</span>
-            )}
-          </p>
+          <div className="text-xs text-slate-500 mt-1 flex flex-wrap items-center gap-2">
+            <span className="font-mono">Active Model: {result.modelUsed}</span>
+            {result.fallbackNotice ? (
+              <span className="px-2 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 font-mono text-[11px]">
+                {result.fallbackNotice}
+              </span>
+            ) : result.fallbackUsed ? (
+              <span className="text-amber-500 font-mono text-[11px]">(fallback model active)</span>
+            ) : null}
+          </div>
         </div>
 
         {/* Metric counts */}
@@ -460,8 +464,8 @@ ${result.conflicts
                         {enrichment.finding}
                       </p>
 
-                      {/* Reference links */}
-                      {enrichment.references.length > 0 && (
+                      {/* Reference links if found, or explicit notice if none */}
+                      {enrichment.references.length > 0 ? (
                         <div className="mt-2.5 pt-2 border-t border-purple-500/20 flex flex-wrap items-center gap-2">
                           <span className="text-[10px] font-mono text-slate-400">
                             Grounding Citations:
@@ -478,6 +482,10 @@ ${result.conflicts
                               <ExternalLink className="w-3 h-3" />
                             </a>
                           ))}
+                        </div>
+                      ) : (
+                        <div className="mt-2 pt-2 border-t border-purple-500/20 text-[11px] font-mono text-slate-400">
+                          Status: No public web citations verified. Written confirmation needed from official source.
                         </div>
                       )}
                     </div>

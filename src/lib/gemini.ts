@@ -1,10 +1,15 @@
 import { GoogleGenAI } from "@google/genai";
-import { getModelList, CallGeminiResult } from "./models.js";
+import {
+  getModelList,
+  CallGeminiResult,
+  FailureCategory,
+  ModelFailureInfo,
+} from "./models.js";
 
 function getGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    console.warn("[LUMEN] GEMINI_API_KEY is not set in environment.");
+    console.warn("[LUMEN SERVER] GEMINI_API_KEY is not set in environment.");
   }
   return new GoogleGenAI({
     apiKey: apiKey || "",
@@ -33,95 +38,258 @@ export function cleanJsonText(raw: string): string {
 }
 
 /**
+ * Categorizes errors cleanly without exposing raw server stacks to clients
+ */
+export function categorizeGeminiError(err: any): FailureCategory {
+  if (err instanceof SyntaxError || err?.message?.includes("JSON")) {
+    return "invalid_json";
+  }
+  const msg = (err?.message || String(err)).toLowerCase();
+  const status = err?.status || err?.code;
+  if (status === 404 || msg.includes("not found") || msg.includes("no longer available")) {
+    return "not_found";
+  }
+  if (
+    status === 429 ||
+    msg.includes("quota") ||
+    msg.includes("resource_exhausted") ||
+    msg.includes("rate limit")
+  ) {
+    return "quota";
+  }
+  if (
+    status === 503 ||
+    msg.includes("unavailable") ||
+    msg.includes("high demand") ||
+    msg.includes("temporarily")
+  ) {
+    return "unavailable";
+  }
+  if (
+    msg.includes("fetch failed") ||
+    msg.includes("network") ||
+    msg.includes("econnrefused") ||
+    msg.includes("timeout")
+  ) {
+    return "network_error";
+  }
+  return "other";
+}
+
+// Emergency safety fallback pool in case all configured models suffer 404 / 503 outages
+const EMERGENCY_FALLBACK_MODELS = [
+  "gemini-flash-lite-latest",
+  "gemini-flash-latest",
+  "gemini-3.5-flash-lite",
+];
+
+function generateWithTimeout(
+  ai: any,
+  params: { model: string; contents: string; config: any },
+  timeoutMs = 7000
+): Promise<any> {
+  let timer: NodeJS.Timeout;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`Model ${params.model} request timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+
+  return Promise.race([
+    ai.models.generateContent(params),
+    timeoutPromise,
+  ]).finally(() => {
+    clearTimeout(timer);
+  });
+}
+
+/**
  * Executes a Gemini request with automatic fallback through configured models.
+ * Logs model failures and reasons server-side only.
  */
 export async function callGeminiJson<T>(
   prompt: string,
   systemInstruction?: string
 ): Promise<CallGeminiResult<T>> {
   const ai = getGeminiClient();
-  const models = getModelList();
-  let lastError: any = null;
+  const configuredModels = getModelList();
+  const failures: ModelFailureInfo[] = [];
 
-  for (let i = 0; i < models.length; i++) {
-    const modelName = models[i];
+  // 1. Try configured models in exact requested order
+  for (let i = 0; i < configuredModels.length; i++) {
+    const modelName = configuredModels[i];
     try {
-      // Execute call
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: prompt,
-        config: {
-          systemInstruction: systemInstruction || "You are an expert analytical research assistant. Output strictly valid JSON with no markdown wrapping.",
-          responseMimeType: "application/json",
+      const response = await generateWithTimeout(
+        ai,
+        {
+          model: modelName,
+          contents: prompt,
+          config: {
+            systemInstruction:
+              systemInstruction ||
+              "You are an expert analytical research assistant. Output strictly valid JSON with no markdown wrapping.",
+            responseMimeType: "application/json",
+            temperature: 0.1,
+          },
         },
-      });
+        7000
+      );
 
       const text = response.text;
-      if (!text) {
-        throw new Error("Empty response received from Gemini model.");
+      if (!text) throw new Error("Empty response received from Gemini model.");
+
+      let parsed: T;
+      try {
+        parsed = JSON.parse(cleanJsonText(text));
+      } catch (jsonErr: any) {
+        throw new SyntaxError(`Model output was not valid JSON: ${jsonErr.message}`);
       }
 
-      const parsed: T = JSON.parse(cleanJsonText(text));
+      const fallbackNotice =
+        failures.length > 0
+          ? `Answered using ${modelName} (fallback: ${failures
+              .map((f) => `${f.model} failed [${f.category}]`)
+              .join(", ")})`
+          : undefined;
+
       return {
         data: parsed,
         modelUsed: modelName,
         fallbackUsed: i > 0,
+        fallbackNotice,
+        failureCategories: failures,
       };
     } catch (err: any) {
-      console.warn(`[LUMEN] Call to model ${modelName} failed:`, err?.message || err);
-      lastError = err;
-      // continue to next model in fallback list
+      const category = categorizeGeminiError(err);
+      failures.push({ model: modelName, category });
+      console.warn(
+        `[LUMEN SERVER] Model "${modelName}" failed with reason category: "${category}". Details: ${err?.message || err}`
+      );
     }
   }
 
-  throw new Error(`All Gemini models failed. Last error: ${lastError?.message || String(lastError)}`);
+  // 2. Emergency fallback pool to prevent 500 error if all configured models are unavailable
+  for (const fallbackModel of EMERGENCY_FALLBACK_MODELS) {
+    if (configuredModels.includes(fallbackModel)) continue;
+    try {
+      console.warn(`[LUMEN SERVER] Engaging emergency fallback model: ${fallbackModel}`);
+      const response = await generateWithTimeout(
+        ai,
+        {
+          model: fallbackModel,
+          contents: prompt,
+          config: {
+            systemInstruction:
+              systemInstruction ||
+              "You are an expert analytical research assistant. Output strictly valid JSON with no markdown wrapping.",
+            responseMimeType: "application/json",
+            temperature: 0.1,
+          },
+        },
+        12000
+      );
+
+      const text = response.text;
+      if (text) {
+        const parsed: T = JSON.parse(cleanJsonText(text));
+        const fallbackNotice = `Answered using ${fallbackModel} (fallback: ${failures
+          .map((f) => `${f.model} failed [${f.category}]`)
+          .join(", ")})`;
+
+        return {
+          data: parsed,
+          modelUsed: fallbackModel,
+          fallbackUsed: true,
+          fallbackNotice,
+          failureCategories: failures,
+        };
+      }
+    } catch (err: any) {
+      const category = categorizeGeminiError(err);
+      failures.push({ model: fallbackModel, category });
+      console.warn(`[LUMEN SERVER] Emergency model "${fallbackModel}" failed [${category}]:`, err?.message || err);
+    }
+  }
+
+  throw new Error(
+    `All configured Gemini models failed. Failure categories: ${failures
+      .map((f) => `${f.model} (${f.category})`)
+      .join(", ")}`
+  );
 }
 
 /**
  * Executes a Gemini call WITH Google Search Grounding.
- * Note: Search grounding may not be combinable with strict JSON schema, so we ask for
- * JSON in the prompt, strip markdown fences, parse with try/catch, and extract real
- * groundingChunks from groundingMetadata.
  */
 export async function callGeminiSearchGrounding(
   prompt: string,
   systemInstruction?: string
-): Promise<{ text: string; groundingChunks: any[]; modelUsed: string; fallbackUsed: boolean }> {
+): Promise<{
+  text: string;
+  groundingChunks: any[];
+  modelUsed: string;
+  fallbackUsed: boolean;
+  fallbackNotice?: string;
+}> {
   const ai = getGeminiClient();
-  const models = getModelList();
-  let lastError: any = null;
+  const configuredModels = getModelList();
+  const failures: ModelFailureInfo[] = [];
 
-  for (let i = 0; i < models.length; i++) {
-    const modelName = models[i];
+  const modelsToTry = [
+    ...configuredModels,
+    ...EMERGENCY_FALLBACK_MODELS.filter((m) => !configuredModels.includes(m)),
+  ];
+
+  for (let i = 0; i < modelsToTry.length; i++) {
+    const modelName = modelsToTry[i];
     try {
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: prompt,
-        config: {
-          systemInstruction:
-            systemInstruction ||
-            "You are a fact-checking and public-record research assistant. You have access to Google Search grounding. Provide strictly accurate information and format your response as JSON.",
-          tools: [{ googleSearch: {} }],
+      const response = await generateWithTimeout(
+        ai,
+        {
+          model: modelName,
+          contents: prompt,
+          config: {
+            systemInstruction:
+              systemInstruction ||
+              "You are a fact-checking and public-record research assistant. You have access to Google Search grounding. Provide strictly accurate information and format your response as JSON.",
+            tools: [{ googleSearch: {} }],
+          },
         },
-      });
+        10000
+      );
 
       const text = response.text || "";
       const groundingChunks =
         response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+
+      const fallbackNotice =
+        failures.length > 0
+          ? `Search grounded with ${modelName} (fallback: ${failures
+              .map((f) => `${f.model} [${f.category}]`)
+              .join(", ")})`
+          : undefined;
 
       return {
         text,
         groundingChunks,
         modelUsed: modelName,
         fallbackUsed: i > 0,
+        fallbackNotice,
       };
     } catch (err: any) {
-      console.warn(`[LUMEN] Grounding call to ${modelName} failed:`, err?.message || err);
-      lastError = err;
+      const category = categorizeGeminiError(err);
+      failures.push({ model: modelName, category });
+      console.warn(
+        `[LUMEN SERVER] Search grounding call to "${modelName}" failed with [${category}]: ${err?.message || err}`
+      );
     }
   }
 
-  throw new Error(`Grounded search failed across all models: ${lastError?.message || String(lastError)}`);
+  throw new Error(
+    `Grounded search failed across all models (${failures
+      .map((f) => `${f.model} [${f.category}]`)
+      .join(", ")})`
+  );
 }
 
 /**
@@ -133,16 +301,18 @@ export async function callGeminiVision(
   prompt?: string
 ): Promise<{ text: string; modelUsed: string }> {
   const ai = getGeminiClient();
-  const models = getModelList();
-  let lastError: any = null;
+  const configuredModels = getModelList();
+  const modelsToTry = [
+    ...configuredModels,
+    ...EMERGENCY_FALLBACK_MODELS.filter((m) => !configuredModels.includes(m)),
+  ];
 
-  // Clean base64 prefix if present
   let cleanBase64 = imageBase64;
   if (cleanBase64.includes(";base64,")) {
     cleanBase64 = cleanBase64.split(";base64,")[1];
   }
 
-  for (const modelName of models) {
+  for (const modelName of modelsToTry) {
     try {
       const response = await ai.models.generateContent({
         model: modelName,
@@ -168,10 +338,9 @@ export async function callGeminiVision(
         modelUsed: modelName,
       };
     } catch (err: any) {
-      console.warn(`[LUMEN] Vision read failed on ${modelName}:`, err?.message || err);
-      lastError = err;
+      console.warn(`[LUMEN SERVER] Vision read failed on ${modelName}:`, err?.message || err);
     }
   }
 
-  throw new Error(`Vision transcription failed: ${lastError?.message || String(lastError)}`);
+  throw new Error("Vision transcription failed across all candidate models.");
 }
