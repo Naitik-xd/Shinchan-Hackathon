@@ -1,0 +1,6 @@
+{
+  "name": "Lumen: Digital Dark Spot Detector",
+  "description": "AI-assisted information-gap intelligence platform detecting missing details, contradictions, outdated claims, and unverified assumptions across multiple sources.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
