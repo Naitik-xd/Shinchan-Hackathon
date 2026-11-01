@@ -10,6 +10,7 @@ import {
   callGeminiSearchGrounding,
   callGeminiVision,
   cleanJsonText,
+  scrubApiKey,
 } from "./lib/gemini.js";
 import { safeFetchUrl } from "./lib/ssrf.js";
 import {
@@ -303,7 +304,8 @@ export function createApiApp() {
         fallbackNotice: geminiResult.fallbackNotice,
       });
     } catch (err: any) {
-      console.error("[LUMEN API] /api/extract error:", err);
+      const safeMsg = scrubApiKey(err?.message || "");
+      console.error("[LUMEN API] /api/extract error:", safeMsg);
       if (err.message?.includes("quota")) {
         return res.status(429).json({
           error: "model quota reached, please retry shortly",
@@ -311,7 +313,7 @@ export function createApiApp() {
       }
       return res.status(500).json({
         error: "Failed to extract facts from provided sources.",
-        message: err.message,
+        message: safeMsg || "Unexpected extraction error.",
       });
     }
   });
@@ -452,7 +454,8 @@ export function createApiApp() {
 
       return res.json(responsePayload);
     } catch (err: any) {
-      console.error("[LUMEN API] /api/analyze error:", err);
+      const safeMsg = scrubApiKey(err?.message || "");
+      console.error("[LUMEN API] /api/analyze error:", safeMsg);
       if (err.message?.includes("quota")) {
         return res.status(429).json({
           error: "model quota reached, please retry shortly",
@@ -460,7 +463,7 @@ export function createApiApp() {
       }
       return res.status(500).json({
         error: "Failed to perform analysis on provided sources.",
-        message: err.message,
+        message: safeMsg || "Unexpected analysis error.",
       });
     }
   });
@@ -541,7 +544,8 @@ export function createApiApp() {
         fallbackNotice: geminiResult.fallbackNotice,
       });
     } catch (err: any) {
-      console.error("[LUMEN API] /api/enrich error:", err);
+      const safeMsg = scrubApiKey(err?.message || "");
+      console.error("[LUMEN API] /api/enrich error:", safeMsg);
       if (err.message?.includes("quota")) {
         return res.status(429).json({
           error: "model quota reached, please retry shortly",
@@ -549,7 +553,7 @@ export function createApiApp() {
       }
       return res.status(500).json({
         error: "Failed to enrich gaps with public search.",
-        message: err.message,
+        message: safeMsg || "Unexpected enrichment error.",
       });
     }
   });
@@ -573,10 +577,11 @@ export function createApiApp() {
         modelUsed: result.modelUsed,
       });
     } catch (err: any) {
-      console.error("[LUMEN API] /api/vision-read error:", err);
+      const safeMsg = scrubApiKey(err?.message || "");
+      console.error("[LUMEN API] /api/vision-read error:", safeMsg);
       return res.status(500).json({
         error: "Failed to read image via Gemini Vision.",
-        message: err.message,
+        message: safeMsg || "Unexpected vision processing error.",
       });
     }
   });

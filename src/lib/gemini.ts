@@ -6,6 +6,33 @@ import {
   ModelFailureInfo,
 } from "./models.js";
 
+/**
+ * Redacts any API keys, tokens, or authorization query params from strings.
+ * Guarantees zero credential exposure in logs, fallbacks, or client responses.
+ */
+export function scrubApiKey(text: string): string {
+  if (!text) return text;
+  let sanitized = String(text);
+
+  // Redact the exact configured GEMINI_API_KEY if present
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (apiKey && apiKey.length > 5) {
+    sanitized = sanitized.split(apiKey).join("[REDACTED_API_KEY]");
+  }
+
+  // Redact standard Google API key patterns (e.g. AIzaSy...)
+  sanitized = sanitized.replace(/AIza[0-9A-Za-z-_]{35}/g, "[REDACTED_API_KEY]");
+
+  // Redact query parameter patterns (e.g. ?key=... or &key=...)
+  sanitized = sanitized.replace(/([?&]key=)[a-zA-Z0-9_\-]+/gi, "$1[REDACTED_API_KEY]");
+
+  // Redact authorization headers
+  sanitized = sanitized.replace(/(x-goog-api-key:\s*)[a-zA-Z0-9_\-]+/gi, "$1[REDACTED_API_KEY]");
+  sanitized = sanitized.replace(/(Bearer\s+)[a-zA-Z0-9_\-\.]{15,}/gi, "$1[REDACTED_TOKEN]");
+
+  return sanitized;
+}
+
 function getGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -38,7 +65,7 @@ export function cleanJsonText(raw: string): string {
 }
 
 /**
- * Categorizes errors cleanly without exposing raw server stacks to clients
+ * Categorizes errors cleanly without exposing raw server stacks or credentials
  */
 export function categorizeGeminiError(err: any): FailureCategory {
   if (err instanceof SyntaxError || err?.message?.includes("JSON")) {
@@ -76,7 +103,6 @@ export function categorizeGeminiError(err: any): FailureCategory {
   return "other";
 }
 
-
 function generateWithTimeout(
   ai: any,
   params: { model: string; contents: string; config: any },
@@ -99,7 +125,7 @@ function generateWithTimeout(
 
 /**
  * Executes a Gemini request with automatic fallback through configured models.
- * Logs model failures and reasons server-side only.
+ * Logs model failures and reasons server-side only with complete key redaction.
  */
 export async function callGeminiJson<T>(
   prompt: string,
@@ -156,8 +182,9 @@ export async function callGeminiJson<T>(
     } catch (err: any) {
       const category = categorizeGeminiError(err);
       failures.push({ model: modelName, category });
+      const safeErrStr = scrubApiKey(err?.message || String(err));
       console.warn(
-        `[LUMEN SERVER] Model "${modelName}" failed [${category}]. Details: ${err?.message || err}`
+        `[LUMEN SERVER] Model "${modelName}" failed [${category}]. Details: ${safeErrStr}`
       );
     }
   }
@@ -230,8 +257,9 @@ export async function callGeminiSearchGrounding(
     } catch (err: any) {
       const category = categorizeGeminiError(err);
       failures.push({ model: modelName, category });
+      const safeErrStr = scrubApiKey(err?.message || String(err));
       console.warn(
-        `[LUMEN SERVER] Search grounding call to "${modelName}" failed with [${category}]: ${err?.message || err}`
+        `[LUMEN SERVER] Search grounding call to "${modelName}" failed with [${category}]: ${safeErrStr}`
       );
     }
   }
@@ -290,7 +318,8 @@ export async function callGeminiVision(
         modelUsed: modelName,
       };
     } catch (err: any) {
-      console.warn(`[LUMEN SERVER] Vision read failed on ${modelName}:`, err?.message || err);
+      const safeErrStr = scrubApiKey(err?.message || String(err));
+      console.warn(`[LUMEN SERVER] Vision read failed on ${modelName}:`, safeErrStr);
     }
   }
 
