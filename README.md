@@ -5,16 +5,49 @@
 
 ---
 
-### ⚠️ Operational Status & Quota Notice
-> **Important Operational Notice**: Lumen is fully verified and operating reliably as intended. However, because deep multi-document cross-examination relies on Google Gemini API endpoints, upstream hard quota limits and capacity boundaries imposed by the model provider may intermittently cause processing delays or temporary rate pauses during periods of high demand. When upstream constraints are encountered, the system automatically transitions through its configured fallback model sequence and surfaces transparent diagnostic feedback.
+### ⚠️ Operational Status, Prototype Notice & Quota Disclaimer
+> **Important Operational Notice**: Lumen is an active pre-release prototype and is **not yet a finished commercial product**; minor bugs or edge cases may occur as development continues. The core platform operates reliably as designed, though because deep multi-document cross-examination depends on Google Gemini API endpoints, upstream hard quota limits and capacity boundaries imposed by the model provider may intermittently cause processing delays or temporary pauses during peak demand. When upstream constraints occur, the system automatically transitions through its configured fallback model sequence and surfaces transparent diagnostic feedback.
 
 ---
 
-### 🛡️ API Rate Limiting & Abuse Prevention Policy
-To protect against automated abuse, safeguard shared token quotas, and ensure stable performance under production workloads:
-- **Strict IP Rate Limit**: **Maximum 7 requests per 5-hour window** across all `/api/*` endpoints.
-- **HTTP 429 Status**: Exceeded quotas return standard `Retry-After` and `X-RateLimit-*` headers with exact human-readable cooldown durations.
-- **Client Resilience**: In-flight requests notify users transparently if the 5-hour threshold is reached, preventing wasted API calls.
+### 🛡️ Persistent Supabase IP Rate Limiting & Abuse Prevention Policy
+Because serverless platforms such as Vercel spin down after periods of inactivity, Lumen persists IP rate-limiting state in **Supabase** (table: `lumen_iprate`) so limits cannot be reset by serverless cold starts:
+- **Strict IP Rate Limit**: **Maximum 2 analysis requests per IP address per 5-hour window**.
+- **Automatic 5-Hour Reset**: Once 5 hours have elapsed since the start of an IP's window, the counter automatically resets to `0`.
+- **Single-Run Token Binding**: Clicking **"Analyze Sources"** logs 1 request in `lumen_iprate` and issues a short-lived, IP-bound HMAC token for the internal `/api/analyze` and `/api/enrich` stages—preventing triple-charging legitimate users while still blocking direct endpoint abuse.
+- **HTTP 429 Response**: Exceeded limits immediately return HTTP `429` with `"Your limit is reached. Try back in 5 hours again."` along with `Retry-After` and `X-RateLimit-*` headers.
+- **Server-Side Only**: All Supabase and Gemini requests execute strictly on the server (Vercel serverless functions). Zero credentials are ever bundled into or exposed to the frontend.
+
+#### Required Supabase Table Setup (`lumen_iprate`)
+Run the following SQL once in your **Supabase SQL Editor**:
+
+```sql
+CREATE TABLE IF NOT EXISTS public.lumen_iprate (
+  ip TEXT PRIMARY KEY,
+  request_count INTEGER NOT NULL DEFAULT 1,
+  window_start TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Enable Row Level Security and allow server-side API access with the anon key
+ALTER TABLE public.lumen_iprate ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow lumen_iprate read"
+  ON public.lumen_iprate FOR SELECT
+  TO anon
+  USING (true);
+
+CREATE POLICY "Allow lumen_iprate insert"
+  ON public.lumen_iprate FOR INSERT
+  TO anon
+  WITH CHECK (true);
+
+CREATE POLICY "Allow lumen_iprate update"
+  ON public.lumen_iprate FOR UPDATE
+  TO anon
+  USING (true)
+  WITH CHECK (true);
+```
 
 ---
 
@@ -31,7 +64,7 @@ Lumen employs a resilient multi-tier fallback architecture using official Google
 
 ## 2. Project Overview
 
-When making high-stakes decisions—such as accepting a tech job offer, evaluating university admissions, applying for scholarships, or signing agreement terms—people face scattered, contradictory, and outdated documents. 
+When making high-stakes decisions—such as accepting a tech job offer, evaluating university admissions, applying for scholarships, or signing agreement terms—people face scattered, contradictory, and outdated documents.
 
 Instead of generating a generic summary, Lumen executes a **3-step gap detection pipeline**:
 - **Critical Information Gaps**: Crucial decision criteria omitted entirely from the materials.
@@ -39,145 +72,60 @@ Instead of generating a generic summary, Lumen executes a **3-step gap detection
 - **Staleness Warnings**: References to expired calendar cycles (e.g. 2023 remote allowances discontinued in 2024).
 - **Three-Tier Evidence Classification**: Strict segregation between 🟢 **Sourced Facts**, 🟣 **AI-Found Grounded Suggestions**, and 🟠 **Uncertain Gaps**.
 - **Prioritized Action Checklist**: Concrete, actionable verification items to resolve ambiguities with employers, bursars, or legal counsel.
+- **Legal Transparency**: Dedicated **Privacy Policy** (`/privacy`) and **Terms & Conditions** (`/terms`) pages accessible from the footer.
 
 ---
 
-## 3. Architecture & Data Flow
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                       BROWSER CLIENT (React 19 + Vite)                      │
-├─────────────────────────────────────────────────────────────────────────────┤
-│  • Input: Question + Sources (Pasted Text, URLs, Scans, Digital PDFs)       │
-│  • Client-Side PDF Parser: pdfjs-dist (zero binary uploads)                 │
-│  • Client-Side OCR: Tesseract.js (lazy-loaded in-browser recognition)       │
-│  • Editable Preview: User can correct OCR noise before processing           │
-│  • Interactive 3D Spotlight: Procedural Three.js glass orb & shadow cone    │
-│  • Local History: Browser localStorage (100% stateless backend)             │
-│  • SEO Control: robots noindex, nofollow meta tags prevent crawler indexing │
-└──────────────────────────────────────┬──────────────────────────────────────┘
-                                       │ (Text-only sanitized payloads)
-                                       ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    NODE.JS / EXPRESS SERVERLESS BACKEND                     │
-├─────────────────────────────────────────────────────────────────────────────┤
-│  [Security Layer]: 7 req/5 hr IP rate limiter, SSRF validator (private block)│
-│                                                                             │
-│  1. GET /api/health                                                         │
-│     • Instant status & model diagnostic endpoint (zero Gemini quota usage)  │
-│                                                                             │
-│  2. POST /api/extract                                                       │
-│     • Safely fetches URLs with timeout & size caps                          │
-│     • Single-pass multi-source extraction saving up to 60% token quota      │
-│     • Assigns S1..Sn IDs to sources with verbatim snippet extraction        │
-│                                                                             │
-│  3. POST /api/analyze                                                       │
-│     • Cross-references all sources and claims                               │
-│     • Topic-aware taxonomy (Scholarships, Hackathons, Job Offers, etc.)     │
-│     • Deterministic conflict detection + AI verification                    │
-│                                                                             │
-│  4. POST /api/enrich                                                        │
-│     • Uses Google Search Grounding to fill high/medium gaps                 │
-│     • Extracts verified URLs from groundingMetadata                         │
-│                                                                             │
-│  5. POST /api/vision-read                                                   │
-│     • Fallback for low-confidence OCR images using Gemini Vision            │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 4. Vercel Deployment Guide
+## 3. Vercel Deployment Guide
 
 Lumen is configured for seamless deployment to **Vercel** with static frontend assets and serverless Node.js API functions.
 
-### Step 1: Push Repository
-Push this repository to your GitHub, GitLab, or Bitbucket account.
+### Step 1: Create the `lumen_iprate` Table in Supabase
+Run the SQL snippet above in your Supabase project's SQL Editor.
 
 ### Step 2: Import into Vercel
 1. In the Vercel Dashboard, click **Add New Project** and select your repository.
-2. The deployment settings are pre-configured in `vercel.json`:
-   - **Framework Preset**: Vite
+2. Deployment settings are pre-configured in `vercel.json`:
    - **Build Command**: `npm run build`
    - **Output Directory**: `dist`
    - **API Routes**: Handled serverlessly by `/api/index.ts`
 
-### Step 3: Configure Environment Variables
-In the Vercel project settings under **Environment Variables**, add:
+### Step 3: Configure Environment Variables (Server-Side Secrets)
+In Vercel Project Settings → **Environment Variables**, add:
 - `GEMINI_API_KEY`: Your Google Gemini API key.
+- `SUPABASE_URL`: Your Supabase project URL (`https://<project-ref>.supabase.co`).
+- `SUPABASE_ANON_KEY`: Your Supabase anon/public key.
 - `GEMINI_MODELS` *(optional)*: `gemini-2.5-flash,gemini-3.8-flash,gemini-2.5-flash-lite`
 
+*(Do NOT add `VITE_` prefixes to these variables so they remain strictly server-side.)*
+
 ### Step 4: Deploy
-Click **Deploy**. Vercel will build the Vite SPA and deploy the serverless API routes with global CDN edge routing.
+Click **Deploy**. Vercel builds the Vite SPA and deploys the serverless API routes with persistent Supabase IP rate limiting.
 
 ---
 
-## 5. Local Development
-
-### Prerequisites
-- Node.js 18+ installed
-- Google Gemini API Key
-
-### Installation
-```bash
-# Clone the repository
-git clone https://github.com/your-username/lumen.git
-cd lumen
-
-# Install dependencies
-npm install
-
-# Setup environment variables
-cp .env.example .env
-# Edit .env and supply your GEMINI_API_KEY
-
-# Run full-stack dev server (Express + Vite)
-npm run dev
-```
-
-Visit `http://localhost:3000` in your browser.
-
----
-
-## 6. Environment Variables Reference
+## 4. Environment Variables Reference
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `GEMINI_API_KEY` | **Yes** | — | Google Gemini API key used in server-side routes |
+| `GEMINI_API_KEY` | **Yes** | — | Google Gemini API key used strictly in server-side routes |
+| `SUPABASE_URL` | **Yes** (Prod) | — | Supabase project URL for persistent `lumen_iprate` rate limiting |
+| `SUPABASE_ANON_KEY` | **Yes** (Prod) | — | Supabase anon/public key used strictly server-side |
 | `GEMINI_MODELS` | No | `gemini-2.5-flash,gemini-3.8-flash,gemini-2.5-flash-lite` | Ordered fallback model chain |
 | `PORT` | No | `3000` | Port for local Express server |
 
 ---
 
-## 7. Safety, Security & Responsible AI
+## 5. Safety, Privacy & Responsible AI
 
-- **Anti-Abuse Rate Limiting**: Strict window of 7 requests per 5 hours per IP address to safeguard upstream quotas.
-- **Search Engine De-Indexing**: Header `<meta name="robots" content="noindex, nofollow" />` active on all pages.
-- **Prompt-Injection Defense**: All untrusted source text is enclosed within strict delimiters (`<<<SOURCE_CONTENT_UNTRUSTED>>>`). Gemini is instructed that source text is untrusted data and instructions inside must be ignored.
-- **SSRF Defense**: URL fetching resolves hostnames and explicitly blocks loopback (`127.0.0.1`), private RFC1918 ranges (`10.x`, `172.16-31.x`, `192.168.x`), link-local/cloud metadata (`169.254.169.254`), and non-HTTP protocols.
-- **Payload Limits**: 500 characters for questions, 8 sources maximum, 30,000 characters per source, 10MB per file, and 10-second fetch timeout.
-- **Privacy First**: Files are never stored on a server. Local history and checklist progress reside strictly in browser `localStorage`.
-- **Transparent Signals**: Credibility signals are clearly marked as estimates, and findings are labeled as potential gaps rather than guaranteed facts.
+- **Persistent Anti-Abuse Rate Limiting**: Strict 2 requests per 5 hours per IP address stored in Supabase (`lumen_iprate`).
+- **Search Engine De-Indexing**: `<meta name="robots" content="noindex, nofollow" />` active on all pages.
+- **Zero Credential Leakage**: All Gemini and Supabase keys are strictly server-side and scrubbed from logs and error responses.
+- **Prompt-Injection & SSRF Defense**: Untrusted source content is isolated inside strict delimiters; URL fetching blocks loopback, RFC1918 private IPs, and cloud metadata endpoints.
+- **Privacy First**: Documents are never persisted on our servers; PDF/OCR parsing runs locally in-browser and history lives solely in browser `localStorage`.
 
 ---
 
-## 8. Legal, Licensing & Copyright Compliance
-
-All code, assets, and libraries used in Lumen are **100% legal, free, and open-source**:
-- **React & React DOM**: MIT License (Meta Platforms, Inc.)
-- **Express**: MIT License (OpenJS Foundation)
-- **@google/genai**: Apache 2.0 License (Google LLC)
-- **Three.js**: MIT License (Ricardo Cabello)
-- **Lucide React**: ISC License (Lucide Contributors)
-- **Zod**: MIT License (Colin McDonnell)
-- **pdfjs-dist**: Apache 2.0 License (Mozilla Foundation)
-- **Tesseract.js**: Apache 2.0 License (Naptha)
-- **Tailwind CSS**: MIT License (Tailwind Labs)
-- **Typography**: `Plus Jakarta Sans`, `DM Sans`, `JetBrains Mono` via the SIL Open Font License (OFL).
-- **Procedural Graphics**: All visual artifacts (such as the 3D optical lens) are procedurally computed in code with zero external proprietary media assets.
-
----
-
-## 9. License
+## 6. License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

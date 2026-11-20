@@ -7,6 +7,7 @@ interface HeaderProps {
   onOpenHistory: () => void;
   onOpenTiers: () => void;
   onScrollToSection: (id: string) => void;
+  onGoHome?: () => void;
   hasResults?: boolean;
 }
 
@@ -16,6 +17,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenHistory,
   onOpenTiers,
   onScrollToSection,
+  onGoHome,
   hasResults,
 }) => {
   return (
@@ -23,10 +25,14 @@ export const Header: React.FC<HeaderProps> = ({
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-8">
         {/* Zone 1: Single text element wordmark */}
         <a
-          href="#"
+          href="/"
           onClick={(e) => {
             e.preventDefault();
-            window.scrollTo({ top: 0, behavior: "smooth" });
+            if (onGoHome) {
+              onGoHome();
+            } else {
+              window.scrollTo({ top: 0, behavior: "smooth" });
+            }
           }}
           className="flex items-center gap-2.5 text-lg font-bold tracking-tight text-slate-900 dark:text-white whitespace-nowrap shrink-0 group"
         >

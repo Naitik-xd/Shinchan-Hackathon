@@ -15,8 +15,12 @@ import {
 import { safeFetchUrl } from "./lib/ssrf.js";
 import {
   checkRateLimit,
+  createRunToken,
+  verifyAndConsumeRunToken,
+  isSupabaseRateLimitConfigured,
   MAX_REQUESTS_PER_WINDOW,
   FIVE_HOURS_MS,
+  LIMIT_REACHED_MESSAGE,
 } from "./lib/rateLimit.js";
 import {
   buildExtractPrompt,
@@ -40,8 +44,12 @@ export function createApiApp() {
   const app = express();
   app.use(express.json({ limit: "15mb" }));
 
-  // Helper to extract client IP across standard servers and Vercel serverless edge
+  // Helper to extract client IP across Vercel edge, reverse proxies, and local dev
   const getClientIp = (req: Request): string => {
+    const vercelForwarded = req.headers["x-vercel-forwarded-for"];
+    if (typeof vercelForwarded === "string" && vercelForwarded.trim()) {
+      return vercelForwarded.split(",")[0].trim();
+    }
     const xRealIp = req.headers["x-real-ip"];
     if (typeof xRealIp === "string" && xRealIp.trim()) {
       return xRealIp.trim();
@@ -53,31 +61,57 @@ export function createApiApp() {
     return req.socket.remoteAddress || "127.0.0.1";
   };
 
-  // Strict Rate Limiting Middleware: strictly 7 requests per 5 hours per IP
-  const rateLimitMiddleware = (req: Request, res: Response, next: () => void) => {
-    const ip = getClientIp(req);
-    const { allowed, remaining, resetInSec, formattedWait } = checkRateLimit(
-      ip,
-      MAX_REQUESTS_PER_WINDOW,
-      FIVE_HOURS_MS
-    );
+  // Persistent Supabase IP Rate Limiting Middleware: strictly 2 requests per 5 hours per IP
+  const createRateLimitMiddleware = (stage?: "analyze" | "enrich") => {
+    return async (req: Request, res: Response, next: () => void) => {
+      try {
+        const ip = getClientIp(req);
 
-    res.setHeader("X-RateLimit-Limit", MAX_REQUESTS_PER_WINDOW.toString());
-    res.setHeader("X-RateLimit-Remaining", remaining.toString());
-    res.setHeader("X-RateLimit-Reset", resetInSec.toString());
+        // If this is a follow-up stage (/api/analyze or /api/enrich) of an already-counted
+        // "Analyze Sources" click, verify the short-lived IP-bound runToken so 1 click = 1 request.
+        if (stage) {
+          const runTokenHeader = req.headers["x-lumen-run-token"];
+          const token = Array.isArray(runTokenHeader)
+            ? runTokenHeader[0]
+            : runTokenHeader;
+          if (verifyAndConsumeRunToken(token, ip, stage)) {
+            return next();
+          }
+        }
 
-    if (!allowed) {
-      res.setHeader("Retry-After", resetInSec.toString());
-      return res.status(429).json({
-        error: `Rate limit exceeded: Strictly ${MAX_REQUESTS_PER_WINDOW} requests allowed per 5-hour window to protect Gemini quota and prevent API abuse. Please retry in ${formattedWait}.`,
-        limit: MAX_REQUESTS_PER_WINDOW,
-        windowHours: 5,
-        retryAfterSeconds: resetInSec,
-        formattedWait,
-      });
-    }
-    next();
+        const { allowed, remaining, resetInSec, formattedWait, message } =
+          await checkRateLimit(ip, MAX_REQUESTS_PER_WINDOW, FIVE_HOURS_MS);
+
+        res.setHeader("X-RateLimit-Limit", MAX_REQUESTS_PER_WINDOW.toString());
+        res.setHeader("X-RateLimit-Remaining", remaining.toString());
+        res.setHeader("X-RateLimit-Reset", resetInSec.toString());
+
+        if (!allowed) {
+          res.setHeader("Retry-After", resetInSec.toString());
+          return res.status(429).json({
+            error: message || LIMIT_REACHED_MESSAGE,
+            limit: MAX_REQUESTS_PER_WINDOW,
+            windowHours: 5,
+            retryAfterSeconds: resetInSec,
+            formattedWait,
+          });
+        }
+        next();
+      } catch (err: any) {
+        console.error(
+          "[LUMEN API] Rate limiter error:",
+          scrubApiKey(err?.message || String(err))
+        );
+        return res.status(503).json({
+          error: "Rate limiting check temporarily unavailable. Please try again shortly.",
+        });
+      }
+    };
   };
+
+  const rateLimitMiddleware = createRateLimitMiddleware();
+  const analyzeRateLimitMiddleware = createRateLimitMiddleware("analyze");
+  const enrichRateLimitMiddleware = createRateLimitMiddleware("enrich");
 
   // --- HEALTH / STATUS ENDPOINT ---
   app.get("/api/health", (req: Request, res: Response) => {
@@ -88,8 +122,12 @@ export function createApiApp() {
       rateLimit: {
         maxRequests: MAX_REQUESTS_PER_WINDOW,
         windowHours: 5,
+        store: isSupabaseRateLimitConfigured()
+          ? "supabase:lumen_iprate"
+          : "memory-fallback",
       },
-      notice: "Application operational. Strict rate limits enforced to protect upstream model quota.",
+      notice:
+        "Application operational. Persistent Supabase IP rate limiting enforced (2 requests per 5 hours).",
     });
   });
 
@@ -296,9 +334,12 @@ export function createApiApp() {
         });
       }
 
+      const runToken = createRunToken(getClientIp(req));
+
       return res.json({
         sources: processedSources,
         facts,
+        runToken,
         modelUsed: geminiResult.modelUsed,
         fallbackUsed: geminiResult.fallbackUsed,
         fallbackNotice: geminiResult.fallbackNotice,
@@ -319,7 +360,7 @@ export function createApiApp() {
   });
 
   // --- STEP 2: POST /api/analyze ---
-  app.post("/api/analyze", rateLimitMiddleware, async (req: Request, res: Response) => {
+  app.post("/api/analyze", analyzeRateLimitMiddleware, async (req: Request, res: Response) => {
     try {
       const parsedBody = AnalyzeRequestSchema.safeParse(req.body);
       if (!parsedBody.success) {
@@ -469,7 +510,7 @@ export function createApiApp() {
   });
 
   // --- STEP 3: POST /api/enrich ---
-  app.post("/api/enrich", rateLimitMiddleware, async (req: Request, res: Response) => {
+  app.post("/api/enrich", enrichRateLimitMiddleware, async (req: Request, res: Response) => {
     try {
       const parsedBody = EnrichRequestSchema.safeParse(req.body);
       if (!parsedBody.success) {

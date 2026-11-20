@@ -14,20 +14,33 @@ export function scrubApiKey(text: string): string {
   if (!text) return text;
   let sanitized = String(text);
 
-  // Redact the exact configured GEMINI_API_KEY if present
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (apiKey && apiKey.length > 5) {
-    sanitized = sanitized.split(apiKey).join("[REDACTED_API_KEY]");
+  // Redact configured secrets if present
+  const secrets = [
+    process.env.GEMINI_API_KEY,
+    process.env.SUPABASE_ANON_KEY,
+    process.env.SUPABASE_KEY,
+    process.env.SUPABASE_PUBLISHABLE_KEY,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+  ];
+  for (const secret of secrets) {
+    if (secret && secret.length > 5) {
+      sanitized = sanitized.split(secret).join("[REDACTED_SECRET]");
+    }
   }
 
   // Redact standard Google API key patterns (e.g. AIzaSy...)
   sanitized = sanitized.replace(/AIza[0-9A-Za-z-_]{35}/g, "[REDACTED_API_KEY]");
+
+  // Redact Supabase publishable keys (sb_publishable_...) and JWTs (eyJ...)
+  sanitized = sanitized.replace(/sb_[a-zA-Z0-9_\-]{16,}/g, "[REDACTED_SUPABASE_KEY]");
+  sanitized = sanitized.replace(/eyJ[a-zA-Z0-9_\-]+\.eyJ[a-zA-Z0-9_\-]+\.[a-zA-Z0-9_\-]+/g, "[REDACTED_JWT]");
 
   // Redact query parameter patterns (e.g. ?key=... or &key=...)
   sanitized = sanitized.replace(/([?&]key=)[a-zA-Z0-9_\-]+/gi, "$1[REDACTED_API_KEY]");
 
   // Redact authorization headers
   sanitized = sanitized.replace(/(x-goog-api-key:\s*)[a-zA-Z0-9_\-]+/gi, "$1[REDACTED_API_KEY]");
+  sanitized = sanitized.replace(/(apikey:\s*)[a-zA-Z0-9_\-\.]+/gi, "$1[REDACTED_API_KEY]");
   sanitized = sanitized.replace(/(Bearer\s+)[a-zA-Z0-9_\-\.]{15,}/gi, "$1[REDACTED_TOKEN]");
 
   return sanitized;

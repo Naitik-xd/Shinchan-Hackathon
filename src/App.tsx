@@ -8,6 +8,7 @@ import { ResultsDashboard } from "./components/ResultsDashboard.js";
 import { SourceViewerDrawer } from "./components/SourceViewerDrawer.js";
 import { TierLegendModal } from "./components/TierLegendModal.js";
 import { HistoryModal } from "./components/HistoryModal.js";
+import { LegalPage, LegalPageType } from "./components/LegalPage.js";
 import { Source, AnalysisResult, ChecklistItem, SampleScenario } from "./types/index.js";
 import { SAMPLE_SCENARIOS } from "./lib/samples.js";
 import { Sparkles, ShieldAlert, ArrowDown, ExternalLink } from "lucide-react";
@@ -42,6 +43,37 @@ export default function App() {
   const [pipelineStage, setPipelineStage] = useState<PipelineStage>("idle");
   const [pipelineError, setPipelineError] = useState<string | undefined>();
   const [currentResult, setCurrentResult] = useState<AnalysisResult | null>(null);
+
+  // Page Routing State ("/", "/privacy", "/terms")
+  const getInitialPage = (): "home" | LegalPageType => {
+    if (typeof window === "undefined") return "home";
+    const path = window.location.pathname.toLowerCase();
+    if (path === "/privacy" || path === "/privacy-policy") return "privacy";
+    if (path === "/terms" || path === "/terms-and-conditions") return "terms";
+    return "home";
+  };
+
+  const [activePage, setActivePage] = useState<"home" | LegalPageType>(getInitialPage);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setActivePage(getInitialPage());
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  const navigateToPage = (page: "home" | LegalPageType) => {
+    setActivePage(page);
+    if (typeof window !== "undefined") {
+      const targetPath =
+        page === "privacy" ? "/privacy" : page === "terms" ? "/terms" : "/";
+      if (window.location.pathname !== targetPath) {
+        window.history.pushState({}, "", targetPath);
+      }
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  };
 
   // Modals & Drawers
   const [isTiersOpen, setIsTiersOpen] = useState(false);
@@ -109,6 +141,7 @@ export default function App() {
       const extractData = await extractRes.json();
       const extractedSources: Source[] = extractData.sources || sources;
       const extractedFacts = extractData.facts || [];
+      const runToken: string | undefined = extractData.runToken;
 
       // FAIL LOUDLY CHECK: If step 1 produces 0 facts, STOP pipeline and show clear error
       if (!extractedFacts || extractedFacts.length === 0) {
@@ -117,9 +150,16 @@ export default function App() {
 
       // Step 2: POST /api/analyze
       setPipelineStage("analyzing");
+      const analyzeHeaders: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (runToken) {
+        analyzeHeaders["X-Lumen-Run-Token"] = runToken;
+      }
+
       const analyzeRes = await fetch("/api/analyze", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: analyzeHeaders,
         body: JSON.stringify({
           question,
           sources: extractedSources,
@@ -164,9 +204,16 @@ export default function App() {
       // Step 3: POST /api/enrich (Google Search Grounding)
       setPipelineStage("enriching");
       try {
+        const enrichHeaders: Record<string, string> = {
+          "Content-Type": "application/json",
+        };
+        if (runToken) {
+          enrichHeaders["X-Lumen-Run-Token"] = runToken;
+        }
+
         const enrichRes = await fetch("/api/enrich", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: enrichHeaders,
           body: JSON.stringify({
             question,
             gaps: preliminaryResult.gaps.map((g) => ({
@@ -240,6 +287,14 @@ export default function App() {
   };
 
   const handleScrollToSection = (id: string) => {
+    if (activePage !== "home") {
+      navigateToPage("home");
+      setTimeout(() => {
+        const el = document.getElementById(id);
+        if (el) el.scrollIntoView({ behavior: "smooth" });
+      }, 100);
+      return;
+    }
     const el = document.getElementById(id);
     if (el) el.scrollIntoView({ behavior: "smooth" });
   };
@@ -256,6 +311,7 @@ export default function App() {
         onOpenHistory={() => setIsHistoryOpen(true)}
         onOpenTiers={() => setIsTiersOpen(true)}
         onScrollToSection={handleScrollToSection}
+        onGoHome={() => navigateToPage("home")}
         hasResults={Boolean(currentResult)}
       />
 
@@ -269,103 +325,152 @@ export default function App() {
 
       {/* Main Container */}
       <main className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-10">
-        {/* Hero Section with Interactive 3D Spotlight */}
-        <section className="relative grid grid-cols-1 lg:grid-cols-12 gap-8 items-center py-6 sm:py-10">
-          <div className="lg:col-span-7 space-y-4 text-left">
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-lg bg-indigo-500/10 border border-indigo-500/20 text-xs font-mono font-semibold text-indigo-600 dark:text-indigo-400">
-              <Sparkles className="w-3.5 h-3.5" />
-              <span>Shinchan Hackathon 2026 · Team DEVENGERS</span>
-            </div>
+        {activePage !== "home" ? (
+          <LegalPage page={activePage} onNavigate={navigateToPage} />
+        ) : (
+          <>
+            {/* Hero Section with Interactive 3D Spotlight */}
+            <section className="relative grid grid-cols-1 lg:grid-cols-12 gap-8 items-center py-6 sm:py-10">
+              <div className="lg:col-span-7 space-y-4 text-left">
+                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-lg bg-indigo-500/10 border border-indigo-500/20 text-xs font-mono font-semibold text-indigo-600 dark:text-indigo-400">
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Shinchan Hackathon 2026 · Team DEVENGERS</span>
+                </div>
 
-            <h1 className="text-3xl sm:text-5xl font-extrabold tracking-tight text-slate-900 dark:text-white leading-[1.15]" style={{ textWrap: "balance" }}>
-              Find what is missing{" "}
-              <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-500 via-indigo-400 to-violet-500">
-                before you decide.
-              </span>
-            </h1>
+                <h1 className="text-3xl sm:text-5xl font-extrabold tracking-tight text-slate-900 dark:text-white leading-[1.15]" style={{ textWrap: "balance" }}>
+                  Find what is missing{" "}
+                  <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-500 via-indigo-400 to-violet-500">
+                    before you decide.
+                  </span>
+                </h1>
 
-            <p className="text-sm sm:text-base text-slate-600 dark:text-slate-400 max-w-xl leading-relaxed">
-              Search engines find information. Summarizers shorten it.{" "}
-              <strong>Lumen exposes the dark spots:</strong> the hidden omissions, conflicting terms between documents, and outdated clauses across your scholarship, job offer, or admissions papers.
-            </p>
+                <p className="text-sm sm:text-base text-slate-600 dark:text-slate-400 max-w-xl leading-relaxed">
+                  Search engines find information. Summarizers shorten it.{" "}
+                  <strong>Lumen exposes the dark spots:</strong> the hidden omissions, conflicting terms between documents, and outdated clauses across your scholarship, job offer, or admissions papers.
+                </p>
 
-            <div className="flex flex-wrap items-center gap-4 pt-2">
-              <button
-                type="button"
-                onClick={() => handleScrollToSection("input-section")}
-                className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 active:scale-[0.98] rounded-xl shadow-md shadow-indigo-600/25 transition-all cursor-pointer"
-              >
-                <span>Start Gap Detection</span>
-                <ArrowDown className="w-3.5 h-3.5" />
-              </button>
+                <div className="flex flex-wrap items-center gap-4 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => handleScrollToSection("input-section")}
+                    className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 active:scale-[0.98] rounded-xl shadow-md shadow-indigo-600/25 transition-all cursor-pointer"
+                  >
+                    <span>Start Gap Detection</span>
+                    <ArrowDown className="w-3.5 h-3.5" />
+                  </button>
 
-              <button
-                type="button"
-                onClick={() => handleSelectSample(SAMPLE_SCENARIOS[0])}
-                className="inline-flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-200 bg-white dark:bg-[#12151D] hover:bg-slate-50 dark:hover:bg-slate-800 border border-slate-200 dark:border-[#232838] rounded-xl transition-all cursor-pointer"
-              >
-                <span>Load Tech Job Offer Sample</span>
-              </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSelectSample(SAMPLE_SCENARIOS[0])}
+                    className="inline-flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-200 bg-white dark:bg-[#12151D] hover:bg-slate-50 dark:hover:bg-slate-800 border border-slate-200 dark:border-[#232838] rounded-xl transition-all cursor-pointer"
+                  >
+                    <span>Load Tech Job Offer Sample</span>
+                  </button>
 
-              <button
-                type="button"
-                onClick={() => setIsTiersOpen(true)}
-                className="text-xs font-mono text-slate-500 hover:text-indigo-500 transition-colors cursor-pointer"
-              >
-                View 3-Tier Legend →
-              </button>
-            </div>
-          </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsTiersOpen(true)}
+                    className="text-xs font-mono text-slate-500 hover:text-indigo-500 transition-colors cursor-pointer"
+                  >
+                    View 3-Tier Legend →
+                  </button>
+                </div>
+              </div>
 
-          {/* Interactive 3D Optical Spotlight Hero */}
-          <div className="lg:col-span-5 h-[280px] sm:h-[320px] rounded-3xl border border-slate-200/80 dark:border-[#232838]/80 bg-white/40 dark:bg-[#12151D]/40 backdrop-blur-md p-2 flex items-center justify-center shadow-lg relative overflow-hidden">
-            <Spotlight3D isDarkTheme={isDark} />
-          </div>
-        </section>
+              {/* Interactive 3D Optical Spotlight Hero */}
+              <div className="lg:col-span-5 h-[280px] sm:h-[320px] rounded-3xl border border-slate-200/80 dark:border-[#232838]/80 bg-white/40 dark:bg-[#12151D]/40 backdrop-blur-md p-2 flex items-center justify-center shadow-lg relative overflow-hidden">
+                <Spotlight3D isDarkTheme={isDark} />
+              </div>
+            </section>
 
-        {/* Sample Scenarios Bar */}
-        <SampleCards onSelectSample={handleSelectSample} />
+            {/* Sample Scenarios Bar */}
+            <SampleCards onSelectSample={handleSelectSample} />
 
-        {/* Multi-Source Ingestion & Processing */}
-        <InputPanel
-          question={question}
-          setQuestion={setQuestion}
-          sources={sources}
-          setSources={setSources}
-          onStartAnalysis={handleStartAnalysis}
-          isAnalyzing={pipelineStage !== "idle" && pipelineStage !== "completed" && pipelineStage !== "error"}
-        />
+            {/* Multi-Source Ingestion & Processing */}
+            <InputPanel
+              question={question}
+              setQuestion={setQuestion}
+              sources={sources}
+              setSources={setSources}
+              onStartAnalysis={handleStartAnalysis}
+              isAnalyzing={pipelineStage !== "idle" && pipelineStage !== "completed" && pipelineStage !== "error"}
+            />
 
-        {/* Pipeline Execution Stepper */}
-        <PipelineProgress stage={pipelineStage} errorMessage={pipelineError} />
+            {/* Pipeline Execution Stepper */}
+            <PipelineProgress stage={pipelineStage} errorMessage={pipelineError} />
 
-        {/* Dashboard Results (When analysis completes) */}
-        {currentResult && (
-          <ResultsDashboard
-            result={currentResult}
-            onOpenSourceViewer={handleOpenSourceViewer}
-            onUpdateChecklist={handleUpdateChecklist}
-          />
+            {/* Dashboard Results (When analysis completes) */}
+            {currentResult && (
+              <ResultsDashboard
+                result={currentResult}
+                onOpenSourceViewer={handleOpenSourceViewer}
+                onUpdateChecklist={handleUpdateChecklist}
+              />
+            )}
+          </>
         )}
       </main>
 
       {/* Footer */}
       <footer className="relative z-10 border-t border-slate-200 dark:border-[#232838] py-8 mt-16 bg-white/50 dark:bg-[#0B0D12]/50 text-xs text-slate-500">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-2">
-            <span className="font-bold text-slate-800 dark:text-slate-200">Lumen</span>
-            <span>·</span>
-            <span>Digital Dark Spot Detector</span>
-            <span>·</span>
-            <span>Team DEVENGERS (Shinchan Online Hackathon 2026)</span>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-4">
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2">
+              <button
+                type="button"
+                onClick={() => navigateToPage("home")}
+                className="font-bold text-slate-800 dark:text-slate-200 hover:text-indigo-500 transition-colors cursor-pointer"
+              >
+                Lumen
+              </button>
+              <span>·</span>
+              <span>Digital Dark Spot Detector</span>
+              <span>·</span>
+              <span>Team DEVENGERS (Shinchan Online Hackathon 2026)</span>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-center gap-4 text-xs font-medium">
+              <a
+                href="/privacy"
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigateToPage("privacy");
+                }}
+                className={`transition-colors ${
+                  activePage === "privacy"
+                    ? "text-indigo-600 dark:text-indigo-400 font-semibold"
+                    : "text-slate-600 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400"
+                }`}
+              >
+                Privacy Policy
+              </a>
+              <span className="text-slate-300 dark:text-slate-700">·</span>
+              <a
+                href="/terms"
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigateToPage("terms");
+                }}
+                className={`transition-colors ${
+                  activePage === "terms"
+                    ? "text-indigo-600 dark:text-indigo-400 font-semibold"
+                    : "text-slate-600 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400"
+                }`}
+              >
+                Terms &amp; Conditions
+              </a>
+              <span className="text-slate-300 dark:text-slate-700">·</span>
+              <span className="text-[11px] font-mono text-slate-500">MIT License</span>
+            </div>
           </div>
 
-          <div className="flex items-center gap-4 text-[11px] font-mono">
-            <span>Serverless 3-Stage Pipeline</span>
-            <span>·</span>
-            <span>Gemini 2.5 Flash + Search Grounding</span>
-            <span>·</span>
-            <span>MIT License</span>
+          <div className="pt-3 border-t border-slate-200/70 dark:border-[#232838]/70 flex flex-col sm:flex-row items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+            <span>
+              Pre-release prototype under active development (may contain bugs). Fair-use limit: 2 analyses per IP every 5 hours.
+            </span>
+            <span className="font-mono text-[10px]">
+              Serverless 3-Stage Pipeline · Gemini 2.5 Flash + Search Grounding
+            </span>
           </div>
         </div>
       </footer>
